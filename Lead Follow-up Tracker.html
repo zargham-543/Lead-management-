@@ -179,9 +179,37 @@ const pill=fs=>`<span class="pill ${cls(fs)}">${esc(fs)}</span>`;
 
 /* ---------- persistence ---------- */
 function toast(m){const t=document.createElement("div");t.className="toast";t.textContent=m;document.body.appendChild(t);setTimeout(()=>t.remove(),2600)}
+async function currentUserName(){
+  try{
+    const u=await window.claude.use("user");
+    if(u){
+      const name=[u.name,u.fullName,u.displayName,u.email].find(v=>typeof v==="string"&&v.trim());
+      if(name&&name.trim())return name.trim();
+    }
+  }catch(e){}
+  try{
+    const stored=localStorage.getItem("leadTrackerUser");
+    if(stored&&stored.trim())return stored.trim();
+  }catch(e){}
+  try{
+    const guessed=(navigator.userAgent||"").includes("Claude")?"Claude user":"Local user";
+    localStorage.setItem("leadTrackerUser", guessed);
+    return guessed;
+  }catch(e){return "Local user"}
+}
 async function save(path,data){
   if(!db){toast("This view can't save changes");return false}
-  try{await db.doc(path).set(data);return true}catch(e){toast("Couldn't save: "+(e&&e.message||"try again"));return false}
+  try{
+    const author=await currentUserName();
+    if((path.startsWith("leads/")||path.startsWith("log/"))&&author){
+      const existing=await db.doc(path).get().catch(()=>null);
+      const before=existing&&existing.exists?existing.data()||{}:{};
+      data={...before,...data,updatedBy:author};
+      if(!before.createdBy&&!data.createdBy)data.createdBy=author;
+    }
+    await db.doc(path).set(data);
+    return true
+  }catch(e){toast("Couldn't save: "+(e&&e.message||"try again"));return false}
 }
 async function remove(path){if(!db)return false;try{await db.doc(path).delete();return true}catch(e){toast("Couldn't delete: "+(e&&e.message||"try again"));return false}}
 const clean=o=>{const r={};for(const k in o){if(k==="d"||k==="id")continue;if(o[k]!==""&&o[k]!=null)r[k]=o[k]}return r};
@@ -232,9 +260,110 @@ function vDash(){
 /* ---------- leads ---------- */
 function vLeads(){
   const opts=["All","Overdue","Due Today","This Week","Upcoming","Needs date","Closed"];
-  return head("Leads",`<span id="lcount"></span>`,canWrite?'<button class="btn primary" data-act="newlead">Add lead</button>':"")+
+  return head("Leads",`<span id="lcount"></span>`,canWrite?'<div class="row"><button class="btn" data-act="importcsv">Import CSV</button><button class="btn primary" data-act="newlead">Add lead</button></div>':"")+ 
   `<div class="tools"><input type="search" id="q" placeholder="Search company, title, contact" value="${esc(filter.q)}" aria-label="Search leads"><select id="fs" aria-label="Filter by follow-up status">${opts.map(o=>`<option ${o===filter.status?"selected":""}>${o}</option>`).join("")}</select></div>
   <div class="tw"><table><thead><tr><th>ID</th><th>Company / role</th><th>Platform</th><th>Profile</th><th>Status</th><th>Priority</th><th>Last contact</th><th>Next follow-up</th><th>Follow-up</th></tr></thead><tbody id="lbody"></tbody></table></div>`;
+}
+function openImportCsv(){
+  if(!canWrite){toast("View-only mode cannot import leads");return}
+  $("#layer").innerHTML=`<div class="overlay" data-act="close"><div class="drawer" onclick="event.stopPropagation()">
+    <div class="row" style="justify-content:space-between"><h3>Import leads from CSV</h3><span class="mono muted">${S.leads.length} leads</span></div>
+    <p class="muted" style="margin:8px 0 12px">Headers can be any of: <strong>title</strong>, <strong>company</strong>, <strong>contact</strong>, <strong>platform</strong>, <strong>profile</strong>, <strong>status</strong>, <strong>priority</strong>, <strong>link</strong>, <strong>terms</strong>, <strong>dateAdded</strong>, <strong>override</strong>, <strong>summary</strong>, <strong>remarks</strong>, <strong>taskLink</strong>. A header row is required.</p>
+    <textarea id="csv-import-box" style="width:100%;min-height:220px;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);resize:vertical" placeholder="title,company,contact,platform,profile,status,priority\nSenior Product Engineer,Acme Labs,Jane,LinkedIn,Product,Contacted / Applied,High"></textarea>
+    <div class="row end" style="margin-top:12px"><button type="button" class="btn" data-act="close">Cancel</button><button type="button" class="btn primary" id="csv-import-run">Import</button></div>
+  </div></div>`;
+  $("#csv-import-run").addEventListener("click",importCsvData);
+}
+function parseCsvRow(line){
+  const cols=[]; let cur="", inQuotes=false;
+  for(let i=0;i<line.length;i++){
+    const ch=line[i];
+    if(ch==='"'){if(inQuotes&&line[i+1]==='"'){cur+='"';i++;}else{inQuotes=!inQuotes;}} 
+    else if(ch===","&&!inQuotes){cols.push(cur);cur="";}
+    else if((ch==='\n'||ch==='\r')&&!inQuotes){break;}
+    else{cur+=ch;}
+  }
+  cols.push(cur);
+  return cols.map(c=>c.trim());
+}
+function normalizeHeader(h){return String(h||"").trim().toLowerCase().replace(/[^a-z0-9]+/g," ").trim().replace(/\s+/g," ").replace(/\s/g,"");}
+function parseCsvImport(raw){
+  const text=String(raw||"").replace(/\uFEFF/g,"").replace(/\r\n/g,"\n").trim();
+  if(!text)return {error:"Paste CSV content first."};
+  const rows=text.split(/\n/).map(line=>parseCsvRow(line));
+  const header=rows[0].map(h=>normalizeHeader(h));
+  const rowsData=rows.slice(1).filter(r=>r.some(cell=>String(cell||"").trim()));
+  if(!header.length||!header.some(Boolean))return {error:"A header row is required."};
+  if(!rowsData.length)return {error:"No lead rows were found in the CSV."};
+  const mapped=[];
+  rowsData.forEach((row,idx)=>{
+    const obj={};
+    for(let i=0;i<header.length;i++){
+      const key=header[i];
+      const val=(row[i]||"").trim();
+      if(!key||!val) continue;
+      const keyMap={
+        title:"title",company:"company",contact:"contact",client:"contact",platform:"platform",
+        profile:"profile",status:"status",priority:"priority",link:"link",url:"link",
+        email:"link",terms:"terms",compensation:"terms",dateadded:"dateAdded",date:"dateAdded",
+        nextfollowupoverride:"override",override:"override",jobsummary:"summary",summary:"summary",
+        remarks:"remarks",tasklink:"taskLink",task:"taskLink"
+      };
+      const mappedKey=keyMap[key]||key;
+      obj[mappedKey]=val;
+    }
+    if(!obj.title&&!obj.company){return;}
+    if(!obj.status)obj.status="New Lead";
+    if(!obj.priority)obj.priority="Medium";
+    if(!obj.platform)obj.platform="Other";
+    if(!obj.profile) obj.profile = S.settings.profiles[0] || "";
+    obj.title=obj.title||"";
+    obj.company=obj.company||"";
+    mapped.push(obj);
+  });
+  if(!mapped.length)return {error:"No valid lead rows were found. Include at least a title or company."};
+  return {rows:mapped};
+}
+async function importCsvData(){
+  const box=$("#csv-import-box");
+  if(!box)return;
+  const parsed=parseCsvImport(box.value);
+  if(parsed.error){toast(parsed.error);return;}
+  const rows=parsed.rows;
+  const writes=[];
+  rows.forEach(r=>{
+    const platform=(r.platform||"").trim(); if(platform && !S.settings.platforms.includes(platform)) S.settings.platforms.push(platform);
+    const profile=(r.profile||"").trim(); if(profile && !S.settings.profiles.includes(profile)) S.settings.profiles.push(profile);
+    const status=(r.status||"New Lead").trim(); if(status && !S.settings.statuses.some(x=>x.name===status)) S.settings.statuses.push({name:status,cadence:3,active:true});
+    const lead={
+      id:nextId(),
+      title:r.title||"",
+      company:r.company||"",
+      contact:r.contact||"",
+      platform:platform||"Other",
+      profile:profile||S.settings.profiles[0]||"",
+      status:status||"New Lead",
+      priority:r.priority||"Medium",
+      link:r.link||"",
+      terms:r.terms||"",
+      dateAdded:r.dateAdded||TODAY,
+      override:r.override||"",
+      summary:r.summary||"",
+      remarks:r.remarks||"",
+      taskLink:r.taskLink||"",
+      synced: ""
+    };
+    writes.push(save("leads/"+lead.id, clean(lead)));
+  });
+  try{
+    await Promise.all(writes);
+    if(S.settings.platforms.length||S.settings.profiles.length||S.settings.contactTypes.length){
+      await save("settings/main", JSON.parse(JSON.stringify(S.settings)));
+    }
+    $("#layer").innerHTML="";
+    toast(rows.length+" lead"+(rows.length===1?"":"s")+" imported");
+    render();
+  }catch(e){toast("Import failed: "+(e&&e.message||"unknown error"));}
 }
 function tableRows(){
   const q=filter.q.toLowerCase();
@@ -242,7 +371,7 @@ function tableRows(){
   const order={"Overdue":0,"Due Today":1,"This Week":2,"Upcoming":3,"Needs date":4,"Closed":5};
   r.sort((a,b)=>(order[a.d.fs]-order[b.d.fs])||((a.d.next||"9")<(b.d.next||"9")?-1:1));
   $("#lcount").textContent=r.length+" shown";
-  $("#lbody").innerHTML=r.length?r.map(x=>`<tr class="click" data-lead="${esc(x.id)}"><td class="mono">${esc(x.id)}</td><td><b>${esc(x.company||"")}</b><br><span class="muted">${esc(x.title||"")}</span></td><td>${esc(x.platform||"")}</td><td>${esc(x.profile||"")}</td><td>${esc(x.status||"")}</td><td>${x.priority==="High"?'<span class="hi">High</span>':esc(x.priority||"")}</td><td class="mono">${fmtS(x.d.last)||"—"}</td><td class="mono">${fmtS(x.d.next)||"—"}</td><td>${pill(x.d.fs)}</td></tr>`).join(""):`<tr><td colspan="9"><div class="empty">${S.leads.length?"No leads match this filter.":"No leads yet. Use Add lead to create the first one."}</div></td></tr>`;
+  $("#lbody").innerHTML=r.length?r.map(x=>`<tr class="click" data-lead="${esc(x.id)}"><td class="mono">${esc(x.id)}</td><td><b>${esc(x.company||"")}</b><br><span class="muted">${esc(x.title||"")}</span>${x.createdBy?`<br><span class="muted" style="font-size:11px">Added by ${esc(x.createdBy)}</span>`:""}</td><td>${esc(x.platform||"")}</td><td>${esc(x.profile||"")}</td><td>${esc(x.status||"")}</td><td>${x.priority==="High"?'<span class="hi">High</span>':esc(x.priority||"")}</td><td class="mono">${fmtS(x.d.last)||"—"}</td><td class="mono">${fmtS(x.d.next)||"—"}</td><td>${pill(x.d.fs)}</td></tr>`).join(""):`<tr><td colspan="9"><div class="empty">${S.leads.length?"No leads match this filter.":"No leads yet. Use Add lead to create the first one."}</div></td></tr>`;
 }
 function sel(id,list,val,blank){return `<select id="${id}">${blank?'<option value=""></option>':""}${list.map(o=>`<option ${o===val?"selected":""}>${esc(o)}</option>`).join("")}${val&&!list.includes(val)?`<option selected>${esc(val)}</option>`:""}</select>`}
 function drawer(id){
@@ -267,7 +396,7 @@ function drawer(id){
     <label class="f full">Remarks<textarea id="f_remarks">${esc(l.remarks||"")}</textarea></label>
     <label class="f full">Task link<input id="f_tasklink" value="${esc(l.taskLink||"")}"></label>
    </div></fieldset>
-   ${isNew?"":`<div class="auto"><span>Last contact<b>${fmt(d.last)||"—"}</b></span><span>Follow-ups logged<b>${d.count}</b></span><span>Next follow-up<b>${fmt(d.next)||"—"}</b></span><span>Status<b>${esc(d.fs)}</b></span></div>`}
+   ${isNew?"":`<div class="auto"><span>Last contact<b>${fmt(d.last)||"—"}</b></span><span>Follow-ups logged<b>${d.count}</b></span><span>Next follow-up<b>${fmt(d.next)||"—"}</b></span><span>Status<b>${esc(d.fs)}</b></span><span>Added by<b>${esc(l.createdBy||"—")}</b></span><span>Edited by<b>${esc(l.updatedBy||"—")}</b></span></div>`}
    <div class="row end"><button type="button" class="btn" data-act="close">Cancel</button>
    ${!isNew?'<button type="button" class="btn" data-act="logfor" data-id="'+esc(l.id)+'">Log a contact</button>':""}
    ${!isNew&&canWrite?'<button type="button" class="btn danger" data-act="dellead" data-id="'+esc(l.id)+'">Delete</button>':""}
@@ -297,7 +426,7 @@ function vLog(){
    <label class="f">Next step<input id="g_next"></label>
    <label class="f" style="grid-column:1/-1">Summary / outcome<input id="g_sum"></label></div>
    <div class="row end" style="margin-top:10px"><button class="btn primary" type="submit">Add to log</button></div></form>`:"")+
-  `<div class="tw"><table><thead><tr><th>Date</th><th>Lead</th><th>Type</th><th>Summary / outcome</th><th>Next step</th><th></th></tr></thead><tbody>${log.length?log.map(x=>`<tr><td class="mono">${fmt(x.date)}</td><td><span class="mono muted">${esc(x.leadId)}</span><br>${esc(name(x.leadId))}</td><td>${esc(x.type||"")}</td><td>${esc(x.summary||"")}</td><td>${esc(x.next||"")}</td><td>${canWrite?`<button class="btn small danger" data-act="dellog" data-id="${esc(x.id)}">Delete</button>`:""}</td></tr>`).join(""):'<tr><td colspan="6"><div class="empty">Nothing logged yet. Add a contact above and the lead gets a follow-up date.</div></td></tr>'}</tbody></table></div>`;
+  `<div class="tw"><table><thead><tr><th>Date</th><th>Lead</th><th>Type</th><th>Summary / outcome</th><th>Next step</th><th></th></tr></thead><tbody>${log.length?log.map(x=>`<tr><td class="mono">${fmt(x.date)}</td><td><span class="mono muted">${esc(x.leadId)}</span><br>${esc(name(x.leadId))}${x.createdBy?`<br><span class="muted" style="font-size:11px">Logged by ${esc(x.createdBy)}</span>`:""}</td><td>${esc(x.type||"")}</td><td>${esc(x.summary||"")}</td><td>${esc(x.next||"")}</td><td>${canWrite?`<button class="btn small danger" data-act="dellog" data-id="${esc(x.id)}">Delete</button>`:""}</td></tr>`).join(""):'<tr><td colspan="6"><div class="empty">Nothing logged yet. Add a contact above and the lead gets a follow-up date.</div></td></tr>'}</tbody></table></div>`;
 }
 function wireLog(){
   const f=$("#lg");if(!f)return;
@@ -376,6 +505,7 @@ document.addEventListener("click",e=>{
   const a=t.dataset.act;
   if(a==="close"){if(t.classList.contains("overlay")&&e.target!==t)return;$("#layer").innerHTML="";return}
   if(a==="newlead")return drawer(null);
+  if(a==="importcsv")return openImportCsv();
   if(a==="logfor"){logLead=t.dataset.id;$("#layer").innerHTML="";return go("log")}
   if(a==="dellead")return confirmDelete(t.dataset.id);
   if(a==="dellog")return void remove("log/"+t.dataset.id);
