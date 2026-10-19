@@ -64,9 +64,12 @@ sign in at `/login`; teammates can create member accounts from the sign-in page.
 
 The standalone HTML tracker stores data only when its host supplies the Claude
 database bridge; this app cannot read that storage directly. Export existing
-leads to CSV from that environment, then use **Import CSV** in the Next.js app.
-Supported fields include title, company, contact, platform, profile, status,
-priority, link, terms, dateAdded, override, summary, remarks, and taskLink.
+leads to `.xlsx`, `.xls`, or `.csv`, then use **Import leads** in the Next.js app.
+Spreadsheet imports use the first worksheet; include a header row with a Job
+Title or Company column. Supported fields include title, company, contact,
+platform, profile, status, priority, link, terms, dateAdded, override, summary,
+remarks, and taskLink. Common alternatives such as Position, Client, Source,
+Compensation, Next Follow-up, Job Description, and Notes are also recognized.
 
 Existing unassigned leads remain visible to managers. They are not automatically
 assigned to a teammate; members see leads they create after signing in.

@@ -1,6 +1,7 @@
 "use client";
 
-import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import * as XLSX from "xlsx";
 import { DEFAULT_SETTINGS, PRIORITIES, Settings } from "@/lib/defaults";
 
 type Lead = {
@@ -99,6 +100,107 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
+const importAliases: Record<string, string> = {
+  title: "title",
+  jobtitle: "title",
+  jobtiltle: "title",
+  position: "title",
+  role: "title",
+  company: "company",
+  companyname: "company",
+  organization: "company",
+  contact: "contact",
+  client: "contact",
+  contactclient: "contact",
+  clientname: "contact",
+  platform: "platform",
+  source: "platform",
+  portal: "platform",
+  profile: "profile",
+  account: "profile",
+  status: "status",
+  stage: "status",
+  priority: "priority",
+  link: "link",
+  url: "link",
+  email: "link",
+  contactlink: "link",
+  contactlinkemail: "link",
+  terms: "terms",
+  compensation: "terms",
+  compensationterms: "terms",
+  budget: "terms",
+  salary: "terms",
+  rate: "terms",
+  dateadded: "dateAdded",
+  date: "dateAdded",
+  added: "dateAdded",
+  nextfollowup: "override",
+  nextfollowupoverride: "override",
+  followup: "override",
+  override: "override",
+  jobdescription: "summary",
+  jobsummary: "summary",
+  jobsummaryjdlink: "summary",
+  description: "summary",
+  jd: "summary",
+  jdlink: "summary",
+  summary: "summary",
+  remarks: "remarks",
+  notes: "remarks",
+  note: "remarks",
+  comments: "remarks",
+  tasklink: "taskLink",
+  task: "taskLink"
+};
+
+function importDate(value: unknown): string {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return `${value.getUTCFullYear()}-${String(value.getUTCMonth() + 1).padStart(2, "0")}-${String(value.getUTCDate()).padStart(2, "0")}`;
+  }
+  if (typeof value === "number") {
+    const date = XLSX.SSF.parse_date_code(value);
+    if (date) return `${date.y}-${String(date.m).padStart(2, "0")}-${String(date.d).padStart(2, "0")}`;
+  }
+  const text = String(value ?? "").trim();
+  const displayDate = text.match(/^(\d{1,2})-([a-z]{3})-(\d{4})$/i);
+  if (displayDate) {
+    const month = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+      .indexOf(displayDate[2].toLowerCase()) + 1;
+    if (month) return `${displayDate[3]}-${String(month).padStart(2, "0")}-${displayDate[1].padStart(2, "0")}`;
+  }
+  const slashDate = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (slashDate) return `${slashDate[3]}-${slashDate[2].padStart(2, "0")}-${slashDate[1].padStart(2, "0")}`;
+  return text;
+}
+
+function mapImportRows(rows: unknown[][]): Record<string, string>[] {
+  let headerIndex = -1;
+  let headers: string[] = [];
+  for (let index = 0; index < Math.min(rows.length, 10); index += 1) {
+    const candidate = (rows[index] ?? []).map((header) => String(header ?? "").toLowerCase().replace(/[^a-z0-9]/g, ""));
+    if (candidate.some((header) => importAliases[header] === "title" || importAliases[header] === "company")) {
+      headerIndex = index;
+      headers = candidate;
+      break;
+    }
+  }
+  if (headerIndex < 0) throw new Error('Could not find a "Job Title" or "Company" column in the first 10 rows.');
+
+  return rows.slice(headerIndex + 1).map((values) => {
+    const lead: Record<string, string> = {};
+    headers.forEach((header, index) => {
+      const key = importAliases[header];
+      if (!key || values[index] === undefined || values[index] === null || values[index] === "") return;
+      const value = key === "dateAdded" || key === "override"
+        ? importDate(values[index])
+        : String(values[index]).trim();
+      if (value) lead[key] = value;
+    });
+    return lead.title || lead.company ? lead : null;
+  }).filter((lead): lead is Record<string, string> => lead !== null);
+}
+
 function parseCsv(text: string): Record<string, string>[] {
   const rows: string[][] = [];
   let row: string[] = [];
@@ -129,42 +231,29 @@ function parseCsv(text: string): Record<string, string>[] {
   row.push(cell.trim());
   if (row.some(Boolean)) rows.push(row);
   if (rows.length < 2) throw new Error("CSV must contain a header row and at least one lead.");
+  const imported = mapImportRows(rows);
+  if (!imported.length) throw new Error("No rows contain a lead title or company.");
+  return imported;
+}
 
-  const aliases: Record<string, string> = {
-    title: "title",
-    jobtitle: "title",
-    company: "company",
-    contact: "contact",
-    client: "contact",
-    platform: "platform",
-    profile: "profile",
-    status: "status",
-    priority: "priority",
-    link: "link",
-    url: "link",
-    email: "link",
-    terms: "terms",
-    compensation: "terms",
-    dateadded: "dateAdded",
-    date: "dateAdded",
-    nextfollowupoverride: "override",
-    override: "override",
-    jobsummary: "summary",
-    summary: "summary",
-    remarks: "remarks",
-    tasklink: "taskLink",
-    task: "taskLink"
-  };
-  const headers = rows[0].map((header) => header.toLowerCase().replace(/[^a-z0-9]/g, ""));
-  return rows.slice(1).map((values) => {
-    const lead: Record<string, string> = {};
-    headers.forEach((header, index) => {
-      const key = aliases[header];
-      if (key && values[index]) lead[key] = values[index];
-    });
-    if (!lead.title && !lead.company) return null;
-    return lead;
-  }).filter((lead): lead is Record<string, string> => lead !== null);
+async function parseImportFile(file: File): Promise<Record<string, string>[]> {
+  const extension = file.name.split(".").pop()?.toLowerCase();
+  if (extension === "csv") return parseCsv(await file.text());
+  if (extension !== "xlsx" && extension !== "xls") {
+    throw new Error("Choose a .xlsx, .xls, or .csv file.");
+  }
+  const workbook = XLSX.read(await file.arrayBuffer(), { type: "array", cellDates: true });
+  const firstSheet = workbook.SheetNames[0];
+  if (!firstSheet) throw new Error("The spreadsheet does not contain a worksheet.");
+  const rows = XLSX.utils.sheet_to_json<unknown[]>(workbook.Sheets[firstSheet], {
+    header: 1,
+    defval: "",
+    raw: true,
+    blankrows: false
+  });
+  const imported = mapImportRows(rows);
+  if (!imported.length) throw new Error("No rows contain a lead title or company.");
+  return imported;
 }
 
 function csvValue(value: unknown) {
@@ -188,6 +277,10 @@ export default function Home() {
   const [leadEditor, setLeadEditor] = useState<Lead | null | undefined>(undefined);
   const [logLead, setLogLead] = useState("");
   const [csvText, setCsvText] = useState("");
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [importError, setImportError] = useState("");
+  const importFileInput = useRef<HTMLInputElement>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [settingsDraft, setSettingsDraft] = useState<Settings>(DEFAULT_SETTINGS);
   const [logDraft, setLogDraft] = useState({
@@ -397,25 +490,60 @@ export default function Home() {
   };
 
   const importCsv = async () => {
-    let imported: Record<string, string>[];
+    setImporting(true);
+    setImportError("");
     try {
-      imported = parseCsv(csvText);
+      const imported = importFile ? await parseImportFile(importFile) : parseCsv(csvText);
       if (!imported.length) throw new Error("No rows contain a lead title or company.");
-      for (const lead of imported) {
-        await mutate("/api/leads", "POST", {
-          ...lead,
-          status: lead.status || "New Lead",
-          priority: lead.priority || "Medium",
-          platform: lead.platform || "Other",
-          profile: lead.profile || settings.profiles[0] || "",
-          dateAdded: lead.dateAdded || today()
-        });
+      const failed: string[] = [];
+      let saved = 0;
+      for (const [index, lead] of imported.entries()) {
+        try {
+          await api("/api/leads", {
+            method: "POST",
+            body: JSON.stringify({
+              data: {
+                ...lead,
+                status: lead.status || "New Lead",
+                priority: lead.priority || "Medium",
+                platform: lead.platform || "Other",
+                profile: lead.profile || settings.profiles[0] || "",
+                dateAdded: lead.dateAdded || today()
+              }
+            })
+          });
+          saved += 1;
+        } catch (error) {
+          failed.push(`Row ${index + 1} (${lead.title || lead.company}): ${error instanceof Error ? error.message : "Import failed."}`);
+        }
+      }
+      if (saved) {
+        try {
+          await refresh();
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Could not refresh tracker data.";
+          setImportError(`${saved} lead${saved === 1 ? " was" : "s were"} saved, but the tracker could not refresh: ${message} Reload before importing again to avoid duplicates.`);
+          notify("Some leads were saved, but the tracker could not refresh");
+          return;
+        }
       }
       setCsvText("");
-      setImportOpen(false);
-      notify(`${imported.length} lead${imported.length === 1 ? "" : "s"} imported`);
+      setImportFile(null);
+      if (importFileInput.current) importFileInput.current.value = "";
+      if (failed.length) {
+        const details = failed.slice(0, 5).join("\n");
+        setImportError(`${saved} of ${imported.length} leads imported. Import only the failed rows if retrying, to avoid duplicates.\n${details}${failed.length > 5 ? `\nAnd ${failed.length - 5} more failed rows.` : ""}`);
+        notify(`${saved} of ${imported.length} leads imported; ${failed.length} failed`);
+      } else {
+        setImportOpen(false);
+        notify(`${saved} lead${saved === 1 ? "" : "s"} imported`);
+      }
     } catch (error) {
-      notify(error instanceof Error ? error.message : "Could not import CSV.");
+      const message = error instanceof Error ? error.message : "Could not import leads.";
+      setImportError(message);
+      notify(message);
+    } finally {
+      setImporting(false);
     }
   };
 
@@ -649,7 +777,7 @@ export default function Home() {
   };
 
   const renderLeads = () => <>
-    {header("Leads", `${filteredRows.length} shown`, <><button className="btn" onClick={() => setImportOpen(true)}>Import CSV</button>{addButton}</>)}
+    {header("Leads", `${filteredRows.length} shown`, <><button className="btn" onClick={() => setImportOpen(true)}>Import leads</button>{addButton}</>)}
     <div className="tools">
       <input type="search" placeholder="Search company, title, contact" aria-label="Search leads" value={query} onChange={(event) => setQuery(event.target.value)}/>
       <select aria-label="Filter by follow-up status" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}>
@@ -848,11 +976,14 @@ export default function Home() {
       </form>
     </div>}
 
-    {importOpen && <div className="overlay" onMouseDown={(event) => { if (event.target === event.currentTarget) setImportOpen(false); }}>
-      <section className="drawer import-drawer"><div className="row drawer-heading"><h3>Import leads from CSV</h3><span className="mono muted">{leads.length} leads</span></div>
-        <p className="muted">Include a header row. Supported fields: title, company, contact, platform, profile, status, priority, link, terms, dateAdded, override, summary, remarks, taskLink.</p>
-        <label className="f">CSV data<textarea className="import-text" value={csvText} onChange={(event) => setCsvText(event.target.value)} placeholder={'title,company,contact,platform,profile,status,priority\nSenior Product Engineer,Acme Labs,Jane,LinkedIn,Product,Contacted / Applied,High'}/></label>
-        <div className="row end drawer-actions"><button className="btn" onClick={() => setImportOpen(false)}>Cancel</button><button className="btn primary" onClick={importCsv}>Import</button></div>
+    {importOpen && <div className="overlay" onMouseDown={(event) => { if (!importing && event.target === event.currentTarget) setImportOpen(false); }}>
+      <section className="drawer import-drawer"><div className="row drawer-heading"><h3>Import leads</h3><span className="mono muted">{leads.length} leads</span></div>
+        <p className="muted">Choose a .xlsx, .xls, or .csv file, or paste CSV below. Include a header row with a Job Title or Company column. The first worksheet is used.</p>
+        <label className="f">Spreadsheet or CSV file<input ref={importFileInput} type="file" accept=".xlsx,.xls,.csv" disabled={importing} onChange={(event) => { setImportFile(event.target.files?.[0] ?? null); setCsvText(""); setImportError(""); }}/></label>
+        {importFile && <p className="muted">Selected: {importFile.name}</p>}
+        <label className="f">Or paste CSV data<textarea className="import-text" disabled={importing} value={csvText} onChange={(event) => { setCsvText(event.target.value); setImportFile(null); if (importFileInput.current) importFileInput.current.value = ""; setImportError(""); }} placeholder={'title,company,contact,platform,profile,status,priority\nSenior Product Engineer,Acme Labs,Jane,LinkedIn,Product,Contacted / Applied,High'}/></label>
+        {importError && <p role="alert" className="error-banner import-error">{importError}</p>}
+        <div className="row end drawer-actions"><button className="btn" disabled={importing} onClick={() => setImportOpen(false)}>Cancel</button><button className="btn primary" disabled={importing || (!importFile && !csvText.trim())} onClick={importCsv}>{importing ? "Importing…" : "Import"}</button></div>
       </section>
     </div>}
     {toast && <div role="status" className="toast">{toast}</div>}

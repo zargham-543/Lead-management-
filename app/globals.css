@@ -277,6 +277,7 @@ tbody tr.click:hover td { background: var(--accent-soft); }
 .csv-label { margin-top: 16px; }
 .import-drawer { padding: 20px; }
 .import-text { min-height: 220px !important; }
+.import-error { margin: 0; white-space: pre-line; overflow-wrap: anywhere; }
 .account-block { display: grid; grid-template-columns: 34px minmax(0, 1fr) 28px; align-items: center; gap: 9px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); padding: 9px; }
 .account-avatar, .member-avatar { display: grid; width: 34px; height: 34px; flex: 0 0 34px; place-items: center; border: 1px solid #dce6f5; border-radius: 11px; background: #edf3fc; color: #315d9d; font: 600 11px var(--f-mono); }
 .account-copy { display: flex; min-width: 0; flex-direction: column; gap: 2px; }
