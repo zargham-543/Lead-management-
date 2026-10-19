@@ -43,7 +43,7 @@ export async function ensureSchema() {
           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
         CREATE INDEX IF NOT EXISTS follow_up_log_lead_date_idx
-          ON follow_up_log (lead_id, ((data->>'date') DESC));
+          ON follow_up_log (lead_id, (data->>'date') DESC);
         CREATE TABLE IF NOT EXISTS tracker_settings (
           id TEXT PRIMARY KEY DEFAULT 'main',
           data JSONB NOT NULL,
