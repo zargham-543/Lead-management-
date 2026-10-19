@@ -50,7 +50,15 @@ whole team. Shared tracker settings are manager-editable.
 - `GET /api/health`
 
 Set `DATABASE_URL` to a managed PostgreSQL connection string when deploying.
-Keep it server-side; do not prefix it with `NEXT_PUBLIC_`.
+For Vercel, add it in the project's **Settings → Environment Variables** for
+each environment you deploy, then redeploy. `.env.local` is only used for local
+development and is not uploaded to Vercel. Keep the URL server-side; do not
+prefix it with `NEXT_PUBLIC_`.
+
+The first manager account must be created once for each database. To bootstrap
+the production database, set the same production `DATABASE_URL` in your local
+`.env.local`, then run `npm run create-manager` from a terminal. After that,
+sign in at `/login`; teammates can create member accounts from the sign-in page.
 
 ## Data migration
 

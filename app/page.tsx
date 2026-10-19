@@ -83,13 +83,19 @@ const formatDate = (date?: string, year = false) =>
       })
     : "";
 
+class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+  }
+}
+
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
     ...init,
     headers: { "Content-Type": "application/json", ...init?.headers }
   });
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.error || `Request failed (${response.status})`);
+  if (!response.ok) throw new ApiError(body.error || `Request failed (${response.status})`, response.status);
   return body as T;
 }
 
@@ -228,7 +234,7 @@ export default function Home() {
         await refresh();
       })
       .catch((error: unknown) => {
-        if (error instanceof Error && error.message.includes("Sign in")) {
+        if (error instanceof ApiError && error.status === 401) {
           window.location.assign("/login");
           return;
         }
